@@ -1,0 +1,42 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // Collection: unsubscribes
+    // Document ID: auto-generated
+    // Fields:
+    //   - email: string (required) - The unsubscribed email address
+    //   - timestamp: number (required) - The time the user unsubscribed
+    // ===============================================================
+
+    // Helper Functions
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+    
+    function isValidEmail(email) {
+       return email is string &&
+         email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidUnsubscribeRecord() {
+      return hasOnlyAllowedFields(['email', 'timestamp']) &&
+             isValidEmail(request.resource.data.email) &&
+             request.resource.data.timestamp is number;
+    }
+
+    match /unsubscribes/{docId} {
+      // Allow anyone to read the blacklist (since the tool has no auth)
+      allow read: if true;
+      
+      // Allow anyone to create an unsubscribe record (since clients click the link)
+      allow create: if isValidUnsubscribeRecord();
+      
+      // Do not allow updates or deletes
+      allow update, delete: if false;
+    }
+  }
+}

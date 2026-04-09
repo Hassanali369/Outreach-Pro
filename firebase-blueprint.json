@@ -1,0 +1,27 @@
+{
+  "entities": {
+    "UnsubscribeRecord": {
+      "title": "UnsubscribeRecord",
+      "description": "A record of an email address that has unsubscribed.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "The unsubscribed email address."
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "The time the user unsubscribed."
+        }
+      },
+      "required": ["email", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/unsubscribes/{docId}": {
+      "schema": { "$ref": "#/entities/UnsubscribeRecord" },
+      "description": "Collection of unsubscribed emails."
+    }
+  }
+}
