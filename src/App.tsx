@@ -627,6 +627,10 @@ export default function App() {
     if (engineRef.current.timeoutId) clearTimeout(engineRef.current.timeoutId);
   };
 
+  const resetSentCounts = () => {
+    setAccounts(prev => prev.map(a => ({ ...a, sentToday: 0 })));
+  };
+
   // --- Handlers: History ---
   const downloadHistoryCSV = () => {
     if (sentHistory.length === 0) return;
@@ -821,6 +825,9 @@ export default function App() {
                       <p className="text-sm text-slate-500 mt-1">Manage your Gmail accounts used for sending campaigns.</p>
                     </div>
                     <div className="flex items-center gap-3">
+                      <button onClick={resetSentCounts} className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors shadow-sm" title="Reset all sent counts to 0">
+                        <Activity className="w-4 h-4" /> Reset Limits
+                      </button>
                       <button onClick={exportAccounts} className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors shadow-sm">
                         <Download className="w-4 h-4" /> Export Backup
                       </button>
