@@ -176,9 +176,20 @@ export default function App() {
   useEffect(() => { localStorage.setItem('outreach_bodies', JSON.stringify(bodies)); }, [bodies]);
 
   // --- State: Settings ---
+  const [delayType, setDelayType] = useState<'fixed' | 'random'>(() => {
+    return (localStorage.getItem('outreach_delay_type') as 'fixed' | 'random') || 'fixed';
+  });
   const [delaySeconds, setDelaySeconds] = useState<number>(() => {
     const saved = localStorage.getItem('outreach_delay');
     return saved ? parseInt(saved, 10) : 30;
+  });
+  const [delayMin, setDelayMin] = useState<number>(() => {
+    const saved = localStorage.getItem('outreach_delay_min');
+    return saved ? parseInt(saved, 10) : 10;
+  });
+  const [delayMax, setDelayMax] = useState<number>(() => {
+    const saved = localStorage.getItem('outreach_delay_max');
+    return saved ? parseInt(saved, 10) : 20;
   });
   const [scheduledTime, setScheduledTime] = useState<string>('');
   const [includeUnsubscribe, setIncludeUnsubscribe] = useState<boolean>(() => {
@@ -187,7 +198,14 @@ export default function App() {
   });
 
   useEffect(() => { localStorage.setItem('outreach_delay', delaySeconds.toString()); }, [delaySeconds]);
+  useEffect(() => { localStorage.setItem('outreach_delay_type', delayType); }, [delayType]);
+  useEffect(() => { localStorage.setItem('outreach_delay_min', delayMin.toString()); }, [delayMin]);
+  useEffect(() => { localStorage.setItem('outreach_delay_max', delayMax.toString()); }, [delayMax]);
   useEffect(() => { localStorage.setItem('outreach_unsub', JSON.stringify(includeUnsubscribe)); }, [includeUnsubscribe]);
+
+  // --- State: Bulk Limit ---
+  const [bulkLimitMin, setBulkLimitMin] = useState('');
+  const [bulkLimitMax, setBulkLimitMax] = useState('');
 
   // --- State: Campaign Engine ---
   const [sendingStatus, setSendingStatus] = useState<'idle' | 'scheduled' | 'running' | 'paused' | 'completed'>('idle');
@@ -220,14 +238,33 @@ export default function App() {
       contacts,
       subjects,
       bodies,
+      delayType,
       delaySeconds,
+      delayMin,
+      delayMax,
       blacklist: combinedBlacklist,
       includeUnsubscribe
     };
-  }, [sendingStatus, currentIndex, accounts, contacts, subjects, bodies, delaySeconds, combinedBlacklist, includeUnsubscribe]);
+  }, [sendingStatus, currentIndex, accounts, contacts, subjects, bodies, delayType, delaySeconds, delayMin, delayMax, combinedBlacklist, includeUnsubscribe]);
 
 
   // --- Handlers: Accounts ---
+  const applyBulkLimits = () => {
+    const min = parseInt(bulkLimitMin);
+    const max = parseInt(bulkLimitMax);
+    
+    if (isNaN(min)) return alert("Please enter a valid minimum limit.");
+    
+    setAccounts(prev => prev.map(acc => {
+      let newLimit = min;
+      if (!isNaN(max) && max > min) {
+        newLimit = Math.floor(Math.random() * (max - min + 1)) + min;
+      }
+      return { ...acc, dailyLimit: newLimit };
+    }));
+    alert("Limits applied to all accounts!");
+  };
+
   const addAccount = () => {
     if (!newAccount.email || !newAccount.password) return alert("Email and App Password are required.");
     setAccounts([...accounts, { ...newAccount, id: Date.now().toString(), sentToday: 0 }]);
@@ -423,7 +460,10 @@ export default function App() {
 
     if (toEmail && subject && html) {
       try {
-        let finalHtml = html;
+        // Remove default margins from paragraph tags to prevent extra spacing in email clients
+        let finalHtml = html.replace(/<p>/g, '<p style="margin: 0; padding: 0;">');
+        finalHtml = finalHtml.replace(/<p class="([^"]*)">/g, '<p class="$1" style="margin: 0; padding: 0;">');
+        
         if (state.includeUnsubscribe) {
           let baseUrl = window.location.origin;
           // In AI Studio, the dev URL is protected. We must use the shared (pre) URL for public links.
@@ -431,7 +471,7 @@ export default function App() {
             baseUrl = baseUrl.replace('ais-dev-', 'ais-pre-');
           }
           const unsubLink = `${baseUrl}/?unsubscribe=${encodeURIComponent(toEmail)}`;
-          finalHtml += `<br><br><p style="font-size:12px; color:#888;">If you no longer wish to receive these emails, <a href="${unsubLink}">click here to unsubscribe</a>.</p>`;
+          finalHtml += `<br><br><p style="margin: 0; padding: 0; font-size:12px; color:#888;">If you no longer wish to receive these emails, <a href="${unsubLink}">click here to unsubscribe</a>.</p>`;
         }
 
         const res = await fetch('/api/send-email', {
@@ -503,7 +543,11 @@ export default function App() {
     setCurrentIndex(nextIndex);
 
     if (nextIndex < state.contacts.length && engineRef.current.status === 'running') {
-      engineRef.current.timeoutId = setTimeout(processQueue, state.delaySeconds * 1000);
+      let currentDelay = state.delaySeconds;
+      if (state.delayType === 'random') {
+        currentDelay = Math.floor(Math.random() * (state.delayMax - state.delayMin + 1)) + state.delayMin;
+      }
+      engineRef.current.timeoutId = setTimeout(processQueue, currentDelay * 1000);
     } else if (nextIndex >= state.contacts.length) {
       setSendingStatus('completed');
     }
@@ -721,6 +765,24 @@ export default function App() {
                         <input type="file" accept=".json" onChange={importAccounts} className="hidden" />
                       </label>
                     </div>
+                  </div>
+
+                  <div className="px-6 py-4 border-b border-slate-200 bg-slate-50">
+                    <h3 className="text-sm font-semibold text-slate-800 mb-3">Bulk Set Daily Limits</h3>
+                    <div className="flex flex-wrap items-end gap-4">
+                      <div>
+                        <label className="block text-xs text-slate-500 mb-1">Min Limit (or Fixed)</label>
+                        <input type="number" value={bulkLimitMin} onChange={e => setBulkLimitMin(e.target.value)} className="w-32 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="e.g. 10" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-500 mb-1">Max Limit (Optional)</label>
+                        <input type="number" value={bulkLimitMax} onChange={e => setBulkLimitMax(e.target.value)} className="w-32 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="e.g. 20" />
+                      </div>
+                      <button onClick={applyBulkLimits} className="px-4 py-2 bg-slate-800 text-white text-sm font-medium rounded-lg hover:bg-slate-700 transition-colors">
+                        Apply to All
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-2">Leave "Max Limit" empty to apply a fixed limit to all accounts. Set both to assign a random limit within the range to each account.</p>
                   </div>
                   
                   <div className="overflow-x-auto">
@@ -1065,10 +1127,31 @@ export default function App() {
                   <div>
                     <label className="block text-sm font-semibold text-slate-900 mb-2">Delay Between Emails</label>
                     <p className="text-sm text-slate-500 mb-4">Adding a delay mimics human behavior and protects your accounts from being flagged as spam.</p>
-                    <div className="flex items-center gap-3">
-                      <input type="number" min="1" value={delaySeconds} onChange={e => setDelaySeconds(parseInt(e.target.value) || 1)} className="w-32 px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm shadow-sm" />
-                      <span className="text-sm font-medium text-slate-600">seconds</span>
+                    
+                    <div className="flex items-center gap-6 mb-4">
+                      <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                        <input type="radio" checked={delayType === 'fixed'} onChange={() => setDelayType('fixed')} className="text-indigo-600 focus:ring-indigo-500 w-4 h-4" />
+                        Fixed Delay
+                      </label>
+                      <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                        <input type="radio" checked={delayType === 'random'} onChange={() => setDelayType('random')} className="text-indigo-600 focus:ring-indigo-500 w-4 h-4" />
+                        Randomized Delay
+                      </label>
                     </div>
+
+                    {delayType === 'fixed' ? (
+                      <div className="flex items-center gap-3">
+                        <input type="number" min="1" value={delaySeconds} onChange={e => setDelaySeconds(parseInt(e.target.value) || 1)} className="w-32 px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm shadow-sm" />
+                        <span className="text-sm font-medium text-slate-600">seconds</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3">
+                        <input type="number" min="1" value={delayMin} onChange={e => setDelayMin(parseInt(e.target.value) || 1)} className="w-24 px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm shadow-sm" placeholder="Min" />
+                        <span className="text-sm font-medium text-slate-600">to</span>
+                        <input type="number" min="1" value={delayMax} onChange={e => setDelayMax(parseInt(e.target.value) || 1)} className="w-24 px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm shadow-sm" placeholder="Max" />
+                        <span className="text-sm font-medium text-slate-600">seconds</span>
+                      </div>
+                    )}
                   </div>
 
                   <div className="border-t border-slate-200 pt-8">
