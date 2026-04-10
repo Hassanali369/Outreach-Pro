@@ -119,6 +119,7 @@ export default function App() {
   useEffect(() => { localStorage.setItem('outreach_blacklist', JSON.stringify(blacklist)); }, [blacklist]);
 
   // --- State: Accounts ---
+  const [globalLimitInput, setGlobalLimitInput] = useState('');
   const [accounts, setAccounts] = useState<Account[]>(() => {
     const saved = localStorage.getItem('outreach_accounts');
     if (!saved) return [];
@@ -177,7 +178,7 @@ export default function App() {
 
   // --- State: Settings ---
   const [delayType, setDelayType] = useState<'fixed' | 'random'>(() => {
-    return (localStorage.getItem('outreach_delay_type') as 'fixed' | 'random') || 'fixed';
+    return localStorage.getItem('outreach_delay_type') as 'fixed' | 'random' || 'fixed';
   });
   const [delaySeconds, setDelaySeconds] = useState<number>(() => {
     const saved = localStorage.getItem('outreach_delay');
@@ -189,7 +190,7 @@ export default function App() {
   });
   const [delayMax, setDelayMax] = useState<number>(() => {
     const saved = localStorage.getItem('outreach_delay_max');
-    return saved ? parseInt(saved, 10) : 20;
+    return saved ? parseInt(saved, 10) : 15;
   });
   const [scheduledTime, setScheduledTime] = useState<string>('');
   const [includeUnsubscribe, setIncludeUnsubscribe] = useState<boolean>(() => {
@@ -197,15 +198,11 @@ export default function App() {
     return saved ? JSON.parse(saved) : false;
   });
 
-  useEffect(() => { localStorage.setItem('outreach_delay', delaySeconds.toString()); }, [delaySeconds]);
   useEffect(() => { localStorage.setItem('outreach_delay_type', delayType); }, [delayType]);
+  useEffect(() => { localStorage.setItem('outreach_delay', delaySeconds.toString()); }, [delaySeconds]);
   useEffect(() => { localStorage.setItem('outreach_delay_min', delayMin.toString()); }, [delayMin]);
   useEffect(() => { localStorage.setItem('outreach_delay_max', delayMax.toString()); }, [delayMax]);
   useEffect(() => { localStorage.setItem('outreach_unsub', JSON.stringify(includeUnsubscribe)); }, [includeUnsubscribe]);
-
-  // --- State: Bulk Limit ---
-  const [bulkLimitMin, setBulkLimitMin] = useState('');
-  const [bulkLimitMax, setBulkLimitMax] = useState('');
 
   // --- State: Campaign Engine ---
   const [sendingStatus, setSendingStatus] = useState<'idle' | 'scheduled' | 'running' | 'paused' | 'completed'>('idle');
@@ -222,7 +219,10 @@ export default function App() {
     contacts: [] as Contact[],
     subjects: [] as Template[],
     bodies: [] as Template[],
+    delayType: 'fixed' as 'fixed' | 'random',
     delaySeconds: 30,
+    delayMin: 10,
+    delayMax: 15,
     blacklist: [] as string[],
     includeUnsubscribe: false,
     timeoutId: null as any
@@ -249,20 +249,27 @@ export default function App() {
 
 
   // --- Handlers: Accounts ---
-  const applyBulkLimits = () => {
-    const min = parseInt(bulkLimitMin);
-    const max = parseInt(bulkLimitMax);
-    
-    if (isNaN(min)) return alert("Please enter a valid minimum limit.");
-    
-    setAccounts(prev => prev.map(acc => {
-      let newLimit = min;
-      if (!isNaN(max) && max > min) {
-        newLimit = Math.floor(Math.random() * (max - min + 1)) + min;
-      }
-      return { ...acc, dailyLimit: newLimit };
-    }));
-    alert("Limits applied to all accounts!");
+  const applyGlobalLimit = () => {
+    if (!globalLimitInput) return;
+    const rangeMatch = globalLimitInput.match(/^(\d+)\s*(?:-|to)\s*(\d+)$/i);
+    if (rangeMatch) {
+      const min = parseInt(rangeMatch[1], 10);
+      const max = parseInt(rangeMatch[2], 10);
+      if (min > max) return alert("Minimum limit cannot be greater than maximum limit.");
+      setAccounts(accounts.map(acc => ({
+        ...acc,
+        dailyLimit: Math.floor(Math.random() * (max - min + 1)) + min
+      })));
+      alert(`Applied random daily limit between ${min} and ${max} to all accounts.`);
+    } else {
+      const limit = parseInt(globalLimitInput, 10);
+      if (isNaN(limit) || limit < 1) return alert("Please enter a valid number or range (e.g., 10 or 10-20).");
+      setAccounts(accounts.map(acc => ({
+        ...acc,
+        dailyLimit: limit
+      })));
+      alert(`Applied daily limit of ${limit} to all accounts.`);
+    }
   };
 
   const addAccount = () => {
@@ -460,10 +467,7 @@ export default function App() {
 
     if (toEmail && subject && html) {
       try {
-        // Remove default margins from paragraph tags to prevent extra spacing in email clients
-        let finalHtml = html.replace(/<p>/g, '<p style="margin: 0; padding: 0;">');
-        finalHtml = finalHtml.replace(/<p class="([^"]*)">/g, '<p class="$1" style="margin: 0; padding: 0;">');
-        
+        let finalHtml = html;
         if (state.includeUnsubscribe) {
           let baseUrl = window.location.origin;
           // In AI Studio, the dev URL is protected. We must use the shared (pre) URL for public links.
@@ -471,7 +475,7 @@ export default function App() {
             baseUrl = baseUrl.replace('ais-dev-', 'ais-pre-');
           }
           const unsubLink = `${baseUrl}/?unsubscribe=${encodeURIComponent(toEmail)}`;
-          finalHtml += `<br><br><p style="margin: 0; padding: 0; font-size:12px; color:#888;">If you no longer wish to receive these emails, <a href="${unsubLink}">click here to unsubscribe</a>.</p>`;
+          finalHtml += `<br><br><p style="font-size:12px; color:#888;">If you no longer wish to receive these emails, <a href="${unsubLink}">click here to unsubscribe</a>.</p>`;
         }
 
         const res = await fetch('/api/send-email', {
@@ -543,10 +547,9 @@ export default function App() {
     setCurrentIndex(nextIndex);
 
     if (nextIndex < state.contacts.length && engineRef.current.status === 'running') {
-      let currentDelay = state.delaySeconds;
-      if (state.delayType === 'random') {
-        currentDelay = Math.floor(Math.random() * (state.delayMax - state.delayMin + 1)) + state.delayMin;
-      }
+      const currentDelay = state.delayType === 'random' 
+        ? Math.floor(Math.random() * (state.delayMax - state.delayMin + 1)) + state.delayMin
+        : state.delaySeconds;
       engineRef.current.timeoutId = setTimeout(processQueue, currentDelay * 1000);
     } else if (nextIndex >= state.contacts.length) {
       setSendingStatus('completed');
@@ -736,6 +739,11 @@ export default function App() {
             </div>
             <div className="h-4 w-px bg-slate-200"></div>
             <div className="flex items-center gap-2 text-sm text-slate-600 font-medium">
+              <Activity className="w-4 h-4 text-slate-400" />
+              {accounts.reduce((sum, acc) => sum + acc.dailyLimit, 0)} Total Daily Limit
+            </div>
+            <div className="h-4 w-px bg-slate-200"></div>
+            <div className="flex items-center gap-2 text-sm text-slate-600 font-medium">
               <Inbox className="w-4 h-4 text-slate-400" />
               {contacts.length} Leads
             </div>
@@ -750,6 +758,38 @@ export default function App() {
             {activeTab === 'accounts' && (
               <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
                 
+                <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-5 flex items-center justify-between shadow-sm">
+                  <div>
+                    <h3 className="text-sm font-semibold text-indigo-900">Total Sending Capacity</h3>
+                    <p className="text-xs text-indigo-700 mt-1">Sum of daily limits across all {accounts.length} accounts. Upload this many emails in your CSV.</p>
+                  </div>
+                  <div className="text-3xl font-bold text-indigo-600 flex items-baseline gap-1">
+                    {accounts.reduce((sum, acc) => sum + acc.dailyLimit, 0)} <span className="text-sm font-medium text-indigo-500">emails/day</span>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mb-6">
+                  <div className="px-6 py-5 border-b border-slate-200 bg-slate-50/50">
+                    <h3 className="text-base font-semibold text-slate-900">Global Daily Limit</h3>
+                    <p className="text-sm text-slate-500 mt-1">Set a daily limit for all accounts. Enter a number (e.g., 10) or a range (e.g., 10-20) to assign randomly.</p>
+                  </div>
+                  <div className="p-6 flex gap-3 items-center">
+                    <input 
+                      type="text" 
+                      value={globalLimitInput} 
+                      onChange={e => setGlobalLimitInput(e.target.value)} 
+                      placeholder="e.g., 10 or 10-20" 
+                      className="w-48 px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm"
+                    />
+                    <button 
+                      onClick={applyGlobalLimit} 
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors shadow-sm"
+                    >
+                      Apply to All
+                    </button>
+                  </div>
+                </div>
+
                 <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
                   <div className="px-6 py-5 border-b border-slate-200 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 bg-slate-50/50">
                     <div>
@@ -765,24 +805,6 @@ export default function App() {
                         <input type="file" accept=".json" onChange={importAccounts} className="hidden" />
                       </label>
                     </div>
-                  </div>
-
-                  <div className="px-6 py-4 border-b border-slate-200 bg-slate-50">
-                    <h3 className="text-sm font-semibold text-slate-800 mb-3">Bulk Set Daily Limits</h3>
-                    <div className="flex flex-wrap items-end gap-4">
-                      <div>
-                        <label className="block text-xs text-slate-500 mb-1">Min Limit (or Fixed)</label>
-                        <input type="number" value={bulkLimitMin} onChange={e => setBulkLimitMin(e.target.value)} className="w-32 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="e.g. 10" />
-                      </div>
-                      <div>
-                        <label className="block text-xs text-slate-500 mb-1">Max Limit (Optional)</label>
-                        <input type="number" value={bulkLimitMax} onChange={e => setBulkLimitMax(e.target.value)} className="w-32 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="e.g. 20" />
-                      </div>
-                      <button onClick={applyBulkLimits} className="px-4 py-2 bg-slate-800 text-white text-sm font-medium rounded-lg hover:bg-slate-700 transition-colors">
-                        Apply to All
-                      </button>
-                    </div>
-                    <p className="text-xs text-slate-500 mt-2">Leave "Max Limit" empty to apply a fixed limit to all accounts. Set both to assign a random limit within the range to each account.</p>
                   </div>
                   
                   <div className="overflow-x-auto">
@@ -1129,13 +1151,13 @@ export default function App() {
                     <p className="text-sm text-slate-500 mb-4">Adding a delay mimics human behavior and protects your accounts from being flagged as spam.</p>
                     
                     <div className="flex items-center gap-6 mb-4">
-                      <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-                        <input type="radio" checked={delayType === 'fixed'} onChange={() => setDelayType('fixed')} className="text-indigo-600 focus:ring-indigo-500 w-4 h-4" />
-                        Fixed Delay
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="radio" name="delayType" checked={delayType === 'fixed'} onChange={() => setDelayType('fixed')} className="text-indigo-600 focus:ring-indigo-500" />
+                        <span className="text-sm font-medium text-slate-700">Fixed Delay</span>
                       </label>
-                      <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-                        <input type="radio" checked={delayType === 'random'} onChange={() => setDelayType('random')} className="text-indigo-600 focus:ring-indigo-500 w-4 h-4" />
-                        Randomized Delay
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="radio" name="delayType" checked={delayType === 'random'} onChange={() => setDelayType('random')} className="text-indigo-600 focus:ring-indigo-500" />
+                        <span className="text-sm font-medium text-slate-700">Random Range</span>
                       </label>
                     </div>
 
