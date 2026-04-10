@@ -30,16 +30,19 @@ type Log = { id: string; time: Date; to: string; status: 'success' | 'error'; me
 type SentRecord = { id: string; email: string; sentAt: string; account: string; subject: string; };
 
 export default function App() {
-  const [unsubscribeEmail, setUnsubscribeEmail] = useState<string | null>(null);
+  const [unsubscribeEmail, setUnsubscribeEmail] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('unsubscribe');
+    }
+    return null;
+  });
   const [unsubscribeStatus, setUnsubscribeStatus] = useState<'loading' | 'success' | 'error'>('loading');
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const email = params.get('unsubscribe');
-    if (email) {
-      setUnsubscribeEmail(email);
+    if (unsubscribeEmail && unsubscribeStatus === 'loading') {
       addDoc(collection(db, 'unsubscribes'), {
-        email: email.toLowerCase().trim(),
+        email: unsubscribeEmail.toLowerCase().trim(),
         timestamp: Date.now()
       }).then(() => {
         setUnsubscribeStatus('success');
@@ -518,8 +521,29 @@ export default function App() {
         };
         setSentHistory(prev => [newRecord, ...prev]);
       } catch (err: any) {
-        setFailCount(f => f + 1);
         const errorMessage = err.message || 'Failed';
+        
+        // Handle AI Studio proxy rate limit / redirect issue
+        if (errorMessage.includes('wrong method: GET')) {
+          const retryCount = (contact as any)._retryCount || 0;
+          if (retryCount < 3) {
+            addLog({ to: toEmail, status: 'error', message: `Network proxy issue, retrying (${retryCount + 1}/3)...`, account: account.email });
+            
+            setContacts(prev => {
+              const newContacts = [...prev];
+              newContacts[state.currentIndex] = { ...newContacts[state.currentIndex], _retryCount: retryCount + 1 };
+              return newContacts;
+            });
+
+            // Retry after 5 seconds without advancing the index
+            if (engineRef.current.status === 'running') {
+              engineRef.current.timeoutId = setTimeout(processQueue, 5000);
+            }
+            return; // Exit here so we don't move to the next contact
+          }
+        }
+
+        setFailCount(f => f + 1);
         addLog({ to: toEmail, status: 'error', message: errorMessage, account: account.email });
         
         // Update contact status to Failed
@@ -641,8 +665,8 @@ export default function App() {
   };
 
   const downloadBlacklistCSV = () => {
-    if (blacklist.length === 0) return;
-    const csvContent = "Email\n" + blacklist.map(e => `"${e}"`).join('\n');
+    if (combinedBlacklist.length === 0) return;
+    const csvContent = "Email\n" + combinedBlacklist.map(e => `"${e}"`).join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -1368,7 +1392,7 @@ export default function App() {
                     <h2 className="text-base font-semibold text-slate-900">Do Not Email (Blacklist)</h2>
                     <p className="text-sm text-slate-500 mt-1">Contacts in this list will be automatically skipped during campaigns.</p>
                   </div>
-                  <button onClick={downloadBlacklistCSV} disabled={blacklist.length === 0} className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium py-2.5 px-4 rounded-lg text-sm flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm">
+                  <button onClick={downloadBlacklistCSV} disabled={combinedBlacklist.length === 0} className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium py-2.5 px-4 rounded-lg text-sm flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm">
                     <Download className="w-4 h-4" /> Export CSV
                   </button>
                 </div>
@@ -1398,16 +1422,25 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {blacklist.length === 0 && (
+                      {combinedBlacklist.length === 0 && (
                         <tr><td colSpan={2} className="px-6 py-12 text-center text-slate-500">No emails in blacklist.</td></tr>
                       )}
-                      {blacklist.map(email => (
+                      {combinedBlacklist.map(email => (
                         <tr key={email} className="hover:bg-slate-50 transition-colors">
-                          <td className="px-6 py-4 font-medium text-slate-900">{email}</td>
+                          <td className="px-6 py-4 font-medium text-slate-900">
+                            {email}
+                            {firebaseUnsubscribes.includes(email) && (
+                              <span className="ml-3 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
+                                Unsubscribed
+                              </span>
+                            )}
+                          </td>
                           <td className="px-6 py-4 text-right">
-                            <button onClick={() => removeFromBlacklist(email)} className="text-slate-400 hover:text-red-600 p-2 rounded-md hover:bg-red-50 transition-colors">
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+                            {!firebaseUnsubscribes.includes(email) && (
+                              <button onClick={() => removeFromBlacklist(email)} className="text-slate-400 hover:text-red-600 p-2 rounded-md hover:bg-red-50 transition-colors" title="Remove from blacklist">
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            )}
                           </td>
                         </tr>
                       ))}
