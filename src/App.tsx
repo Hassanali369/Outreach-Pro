@@ -5,9 +5,9 @@ import 'react-quill-new/dist/quill.snow.css';
 import { 
   Upload, Mail, Settings, Play, Pause, Square, CheckCircle, 
   AlertCircle, FileText, X, Eye, Plus, Trash2, Clock, Users, 
-  LayoutTemplate, Activity, ChevronRight, Inbox, BarChart3, History, Download, ShieldAlert, Menu
+  LayoutTemplate, Activity, ChevronRight, Inbox, BarChart3, History, Download, ShieldAlert, Menu, Search, Pencil
 } from 'lucide-react';
-import { collection, addDoc, onSnapshot, query } from 'firebase/firestore';
+import { collection, addDoc, onSnapshot, query, deleteDoc, doc } from 'firebase/firestore';
 import { db } from './firebase';
 
 const quillModules = {
@@ -103,22 +103,28 @@ export default function App() {
     const saved = localStorage.getItem('outreach_blacklist');
     return saved ? JSON.parse(saved) : [];
   });
-  const [firebaseUnsubscribes, setFirebaseUnsubscribes] = useState<string[]>([]);
+  const [firebaseUnsubscribes, setFirebaseUnsubscribes] = useState<{id: string, email: string}[]>([]);
   
   useEffect(() => {
     const q = query(collection(db, 'unsubscribes'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const emails = snapshot.docs.map(doc => doc.data().email as string);
-      setFirebaseUnsubscribes(emails);
+      const data = snapshot.docs.map(doc => ({ id: doc.id, email: doc.data().email as string }));
+      setFirebaseUnsubscribes(data);
     }, (error) => {
       console.error('Error fetching unsubscribes from Firebase:', error);
     });
     return () => unsubscribe();
   }, []);
 
-  const combinedBlacklist = [...new Set([...blacklist, ...firebaseUnsubscribes])];
+  const combinedBlacklist = [...new Set([...blacklist, ...firebaseUnsubscribes.map(u => u.email)])];
 
   const [newBlacklistEmail, setNewBlacklistEmail] = useState('');
+  const [blacklistSearch, setBlacklistSearch] = useState('');
+  
+  const filteredBlacklist = combinedBlacklist.filter(email => 
+    email.toLowerCase().includes(blacklistSearch.toLowerCase().trim())
+  );
+
   useEffect(() => { localStorage.setItem('outreach_blacklist', JSON.stringify(blacklist)); }, [blacklist]);
 
   // --- State: Accounts ---
@@ -142,6 +148,7 @@ export default function App() {
     }
   });
   const [newAccount, setNewAccount] = useState({ email: '', password: '', name: '', dailyLimit: 100 });
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
   const [accountToDelete, setAccountToDelete] = useState<string | null>(null);
 
   useEffect(() => { localStorage.setItem('outreach_accounts', JSON.stringify(accounts)); }, [accounts]);
@@ -275,10 +282,28 @@ export default function App() {
     }
   };
 
-  const addAccount = () => {
+  const saveAccount = () => {
     if (!newAccount.email || !newAccount.password) return alert("Email and App Password are required.");
-    setAccounts([...accounts, { ...newAccount, id: Date.now().toString(), sentToday: 0 }]);
+    
+    if (editingAccountId) {
+      setAccounts(accounts.map(a => a.id === editingAccountId ? { ...a, ...newAccount } : a));
+      setEditingAccountId(null);
+    } else {
+      setAccounts([...accounts, { ...newAccount, id: Date.now().toString(), sentToday: 0 }]);
+    }
     setNewAccount({ email: '', password: '', name: '', dailyLimit: 100 });
+  };
+
+  const cancelEditAccount = () => {
+    setEditingAccountId(null);
+    setNewAccount({ email: '', password: '', name: '', dailyLimit: 100 });
+  };
+
+  const startEditAccount = (acc: Account) => {
+    setEditingAccountId(acc.id);
+    setNewAccount({ email: acc.email, password: acc.password, name: acc.name, dailyLimit: acc.dailyLimit });
+    const formEl = document.getElementById('account-form');
+    if (formEl) formEl.scrollIntoView({ behavior: 'smooth' });
   };
 
   const removeAccount = (id: string) => setAccounts(accounts.filter(a => a.id !== id));
@@ -382,18 +407,43 @@ export default function App() {
     }
   };
 
+  // --- Template Engine & Spintax ---
+  const parseSpintax = (text: string) => {
+    let result = text;
+    // Regex matches the innermost {a|b|c} to parse recursively if needed, though simple spintax is sufficient
+    const regEx = /\{([^{}]+)\}/g;
+    
+    // Loop until there are no more spintax brackets
+    let matches;
+    while ((matches = regEx.exec(result)) !== null) {
+      const options = matches[1].split('|');
+      const randomOption = options[Math.floor(Math.random() * options.length)];
+      result = result.substring(0, matches.index) + randomOption + result.substring(matches.index + matches[0].length);
+      // Reset index since we modified the string
+      regEx.lastIndex = 0;
+    }
+    return result;
+  };
+
   const generateEmail = (template: string, contact: Contact, senderName?: string) => {
     if (!template || !contact) return '';
     let result = template;
+    
+    // 1. Replace columns first
     columns.forEach(col => {
-      const regex = new RegExp(`{{${col}}}`, 'g');
+      // Escape special regex characters in column names
+      const escapedCol = col.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`{{${escapedCol}}}`, 'g');
       result = result.replace(regex, contact[col] || '');
     });
     
-    // Replace SenderName variable if present
+    // 2. Replace SenderName variable if present
     if (senderName) {
       result = result.replace(/{{SenderName}}/g, senderName);
     }
+    
+    // 3. Process Spintax (e.g. {Hi|Hello} {{First Name}})
+    result = parseSpintax(result);
     
     return result;
   };
@@ -543,6 +593,28 @@ export default function App() {
           }
         }
 
+        // Handle Gmail Daily Limit Exceeded or Auth Errors
+        const isAccountError = 
+          errorMessage.includes('550-5.4.5') || 
+          errorMessage.includes('Daily user sending limit exceeded') ||
+          errorMessage.includes('535-5.7.8') ||
+          errorMessage.includes('Invalid login') ||
+          errorMessage.includes('Application-specific password required') ||
+          errorMessage.includes('Bad credentials');
+
+        if (isAccountError) {
+          addLog({ to: toEmail, status: 'error', message: `Account error/limit reached. Switching account...`, account: account.email });
+          
+          // Force the account to reach its limit so it's skipped
+          setAccounts(prev => prev.map(a => a.id === account.id ? { ...a, sentToday: Math.max(a.sentToday, a.dailyLimit) } : a));
+          
+          // Retry the SAME contact immediately with a different account
+          if (engineRef.current.status === 'running') {
+            engineRef.current.timeoutId = setTimeout(processQueue, 1500);
+          }
+          return; // Exit here so we don't move to the next contact
+        }
+
         setFailCount(f => f + 1);
         addLog({ to: toEmail, status: 'error', message: errorMessage, account: account.email });
         
@@ -654,6 +726,8 @@ export default function App() {
     setShowClearConfirm(false);
   };
 
+  const [showClearBlacklistConfirm, setShowClearBlacklistConfirm] = useState(false);
+
   // --- Handlers: Blacklist ---
   const addToBlacklist = () => {
     if (!newBlacklistEmail) return;
@@ -664,8 +738,47 @@ export default function App() {
     setNewBlacklistEmail('');
   };
 
-  const removeFromBlacklist = (email: string) => {
-    setBlacklist(blacklist.filter(e => e !== email));
+  const removeFromBlacklist = async (email: string) => {
+    // Remove from local state
+    setBlacklist(prev => prev.filter(e => e !== email));
+    
+    // Remove from Firebase if it exists there
+    const fbRecords = firebaseUnsubscribes.filter(u => u.email === email);
+    for (const record of fbRecords) {
+      try {
+        await deleteDoc(doc(db, 'unsubscribes', record.id));
+      } catch (err) {
+        console.error("Error deleting from Firebase:", err);
+      }
+    }
+  };
+
+  const clearBlacklist = async () => {
+    setBlacklist([]);
+    for (const record of firebaseUnsubscribes) {
+      try {
+        await deleteDoc(doc(db, 'unsubscribes', record.id));
+      } catch (err) {
+        console.error("Error deleting from Firebase:", err);
+      }
+    }
+    setShowClearBlacklistConfirm(false);
+  };
+
+  const importBlacklist = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      const emails = text.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/gi) || [];
+      if (emails.length > 0) {
+        const uniqueNewEmails = emails.map(email => email.toLowerCase().trim());
+        setBlacklist(prev => [...new Set([...prev, ...uniqueNewEmails])]);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // reset input
   };
 
   const downloadBlacklistCSV = () => {
@@ -894,9 +1007,14 @@ export default function App() {
                                   <button onClick={() => setAccountToDelete(null)} className="text-xs font-medium text-slate-700 bg-slate-200 hover:bg-slate-300 px-2 py-1 rounded transition-colors">No</button>
                                 </div>
                               ) : (
-                                <button onClick={() => setAccountToDelete(acc.id)} className="text-slate-400 hover:text-red-600 transition-colors p-2 rounded-md hover:bg-red-50" title="Remove Account">
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
+                                <div className="flex items-center justify-end gap-1">
+                                  <button onClick={() => startEditAccount(acc)} className="text-slate-400 hover:text-indigo-600 transition-colors p-2 rounded-md hover:bg-indigo-50" title="Edit Account">
+                                    <Pencil className="w-4 h-4" />
+                                  </button>
+                                  <button onClick={() => setAccountToDelete(acc.id)} className="text-slate-400 hover:text-red-600 transition-colors p-2 rounded-md hover:bg-red-50" title="Remove Account">
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
                               )}
                             </td>
                           </tr>
@@ -906,10 +1024,17 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-                  <div className="px-6 py-5 border-b border-slate-200 bg-slate-50/50">
-                    <h3 className="text-base font-semibold text-slate-900">Add New Account</h3>
-                    <p className="text-sm text-slate-500 mt-1">Connect a new Gmail account using an App Password.</p>
+                <div id="account-form" className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                  <div className="px-6 py-5 border-b border-slate-200 bg-slate-50/50 flex justify-between items-center">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-900">{editingAccountId ? 'Edit Account' : 'Add New Account'}</h3>
+                      <p className="text-sm text-slate-500 mt-1">{editingAccountId ? 'Update your Gmail account details.' : 'Connect a new Gmail account using an App Password.'}</p>
+                    </div>
+                    {editingAccountId && (
+                      <button onClick={cancelEditAccount} className="text-sm font-medium text-slate-600 hover:text-slate-900 px-3 py-1.5 rounded-lg hover:bg-slate-100 transition-colors">
+                        Cancel Edit
+                      </button>
+                    )}
                   </div>
                   <div className="p-6">
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 items-end">
@@ -930,8 +1055,9 @@ export default function App() {
                         <input type="number" value={newAccount.dailyLimit} onChange={e => setNewAccount({...newAccount, dailyLimit: parseInt(e.target.value) || 0})} className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm transition-shadow" />
                       </div>
                       <div className="lg:col-span-1">
-                        <button onClick={addAccount} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-4 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors shadow-sm">
-                          <Plus className="w-4 h-4" /> Add Account
+                        <button onClick={saveAccount} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-4 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors shadow-sm">
+                          {editingAccountId ? <CheckCircle className="w-4 h-4" /> : <Plus className="w-4 h-4" />} 
+                          {editingAccountId ? 'Update' : 'Add Account'}
                         </button>
                       </div>
                     </div>
@@ -1036,28 +1162,30 @@ export default function App() {
             {activeTab === 'templates' && (
               <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
                 
-                <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                  <div className="flex items-center gap-4 flex-wrap">
-                    <span className="text-sm font-semibold text-slate-700 whitespace-nowrap">Available Variables:</span>
-                    <div className="flex flex-wrap gap-2">
-                      <button onClick={() => navigator.clipboard.writeText(`{{SenderName}}`)} className="px-3 py-1.5 bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100 text-xs font-medium rounded-md border transition-all cursor-copy" title="Click to copy">
-                        {`{{SenderName}}`}
-                      </button>
-                      {columns.length > 0 ? columns.map(col => (
-                        <button key={col} onClick={() => navigator.clipboard.writeText(`{{${col}}}`)} className="px-3 py-1.5 bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 hover:border-indigo-200 text-slate-700 text-xs font-medium rounded-md border border-slate-200 transition-all cursor-copy" title="Click to copy">
-                          {`{{${col}}}`}
+                <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200 flex flex-col gap-4">
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                    <div className="flex items-center gap-4 flex-wrap">
+                      <span className="text-sm font-semibold text-slate-700 whitespace-nowrap">Available Variables:</span>
+                      <div className="flex flex-wrap gap-2">
+                        <button onClick={() => navigator.clipboard.writeText(`{{SenderName}}`)} className="px-3 py-1.5 bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100 text-xs font-medium rounded-md border transition-all cursor-copy" title="Click to copy">
+                          {`{{SenderName}}`}
                         </button>
-                      )) : (
-                        <span className="text-xs text-slate-500 italic">Upload contacts to see more variables (e.g., {"{{Name}}"})</span>
-                      )}
+                        {columns.length > 0 ? columns.map(col => (
+                          <button key={col} onClick={() => navigator.clipboard.writeText(`{{${col}}}`)} className="px-3 py-1.5 bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 hover:border-indigo-200 text-slate-700 text-xs font-medium rounded-md border border-slate-200 transition-all cursor-copy" title="Click to copy">
+                            {`{{${col}}}`}
+                          </button>
+                        )) : (
+                          <span className="text-xs text-slate-500 italic">Upload contacts to see more variables (e.g., {"{{Name}}"})</span>
+                        )}
+                      </div>
                     </div>
+                    <button 
+                      onClick={() => setPreviewIndex(previewIndex === null ? 0 : null)}
+                      className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${previewIndex !== null ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}
+                    >
+                      <Eye className="w-4 h-4" /> {previewIndex !== null ? 'Exit Preview' : 'Preview Mode'}
+                    </button>
                   </div>
-                  <button 
-                    onClick={() => setPreviewIndex(previewIndex === null ? 0 : null)}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${previewIndex !== null ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}
-                  >
-                    <Eye className="w-4 h-4" /> {previewIndex !== null ? 'Exit Preview' : 'Preview Mode'}
-                  </button>
                 </div>
 
                 {previewIndex !== null ? (
@@ -1394,18 +1522,42 @@ export default function App() {
             {/* TAB: BLACKLIST */}
             {activeTab === 'blacklist' && (
               <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-500">
-                <div className="px-6 py-5 border-b border-slate-200 bg-slate-50/50 flex justify-between items-center">
+                <div className="px-6 py-5 border-b border-slate-200 bg-slate-50/50 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
                   <div>
-                    <h2 className="text-base font-semibold text-slate-900">Do Not Email (Blacklist)</h2>
+                    <h2 className="text-base font-semibold text-slate-900">
+                      Do Not Email (Blacklist) <span className="ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-200 text-slate-800">{combinedBlacklist.length}</span>
+                    </h2>
                     <p className="text-sm text-slate-500 mt-1">Contacts in this list will be automatically skipped during campaigns.</p>
                   </div>
-                  <button onClick={downloadBlacklistCSV} disabled={combinedBlacklist.length === 0} className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium py-2.5 px-4 rounded-lg text-sm flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm">
-                    <Download className="w-4 h-4" /> Export CSV
-                  </button>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <label className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium py-2.5 px-4 rounded-lg text-sm flex items-center gap-2 transition-colors cursor-pointer shadow-sm">
+                      <Upload className="w-4 h-4" /> Import CSV/TXT
+                      <input type="file" accept=".csv,.txt" onChange={importBlacklist} className="hidden" />
+                    </label>
+                    <button onClick={downloadBlacklistCSV} disabled={combinedBlacklist.length === 0} className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium py-2.5 px-4 rounded-lg text-sm flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm">
+                      <Download className="w-4 h-4" /> Export CSV
+                    </button>
+                    <button onClick={() => setShowClearBlacklistConfirm(true)} disabled={combinedBlacklist.length === 0} className="bg-white border border-red-200 hover:bg-red-50 text-red-600 font-medium py-2.5 px-4 rounded-lg text-sm flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm">
+                      <Trash2 className="w-4 h-4" /> Clear All
+                    </button>
+                  </div>
                 </div>
                 
-                <div className="p-6 border-b border-slate-200 bg-slate-50/30">
-                  <div className="flex gap-3 max-w-md">
+                {showClearBlacklistConfirm && (
+                  <div className="p-4 bg-red-50 border-b border-red-100 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                    <div className="flex items-center gap-3 text-red-800">
+                      <AlertCircle className="w-5 h-5 shrink-0" />
+                      <p className="text-sm">Are you sure you want to clear the entire blacklist? This will allow sending emails to previously unsubscribed users.</p>
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                      <button onClick={() => setShowClearBlacklistConfirm(false)} className="px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50">Cancel</button>
+                      <button onClick={clearBlacklist} className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700">Yes, Clear All</button>
+                    </div>
+                  </div>
+                )}
+                
+                <div className="p-6 border-b border-slate-200 bg-slate-50/30 flex flex-col sm:flex-row gap-4 justify-between">
+                  <div className="flex gap-3 w-full max-w-md">
                     <input 
                       type="email" 
                       value={newBlacklistEmail} 
@@ -1418,6 +1570,18 @@ export default function App() {
                       <Plus className="w-4 h-4" /> Add
                     </button>
                   </div>
+                  <div className="relative w-full max-w-xs">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                      <Search className="h-4 w-4 text-slate-400" />
+                    </div>
+                    <input
+                      type="text"
+                      value={blacklistSearch}
+                      onChange={e => setBlacklistSearch(e.target.value)}
+                      placeholder="Search blacklist..."
+                      className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm shadow-sm"
+                    />
+                  </div>
                 </div>
 
                 <div className="overflow-x-auto max-h-[400px]">
@@ -1429,25 +1593,25 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {combinedBlacklist.length === 0 && (
-                        <tr><td colSpan={2} className="px-6 py-12 text-center text-slate-500">No emails in blacklist.</td></tr>
+                      {filteredBlacklist.length === 0 && (
+                        <tr><td colSpan={2} className="px-6 py-12 text-center text-slate-500">
+                          {combinedBlacklist.length === 0 ? "No emails in blacklist." : "No matching emails found."}
+                        </td></tr>
                       )}
-                      {combinedBlacklist.map(email => (
+                      {filteredBlacklist.map(email => (
                         <tr key={email} className="hover:bg-slate-50 transition-colors">
                           <td className="px-6 py-4 font-medium text-slate-900">
                             {email}
-                            {firebaseUnsubscribes.includes(email) && (
+                            {firebaseUnsubscribes.some(u => u.email === email) && (
                               <span className="ml-3 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
                                 Unsubscribed
                               </span>
                             )}
                           </td>
                           <td className="px-6 py-4 text-right">
-                            {!firebaseUnsubscribes.includes(email) && (
-                              <button onClick={() => removeFromBlacklist(email)} className="text-slate-400 hover:text-red-600 p-2 rounded-md hover:bg-red-50 transition-colors" title="Remove from blacklist">
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            )}
+                            <button onClick={() => removeFromBlacklist(email)} className="text-slate-400 hover:text-red-600 p-2 rounded-md hover:bg-red-50 transition-colors" title="Remove from blacklist">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
                           </td>
                         </tr>
                       ))}

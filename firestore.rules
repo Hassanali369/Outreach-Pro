@@ -35,8 +35,11 @@ service cloud.firestore {
       // Allow anyone to create an unsubscribe record (since clients click the link)
       allow create: if isValidUnsubscribeRecord();
       
-      // Do not allow updates or deletes
-      allow update, delete: if false;
+      // Allow deletes so the user can clear the blacklist
+      allow delete: if true;
+      
+      // Do not allow updates
+      allow update: if false;
     }
   }
 }
